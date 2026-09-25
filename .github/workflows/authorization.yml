@@ -1,0 +1,129 @@
+name: API Authorization Security Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authorization-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  authorization:
+    name: HTTP authorization and mutation tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test hardened API and prove six regressions are detected
+        run: python scripts/run_pipeline.py --output evidence
+      - name: Publish readable result summary
+        if: always()
+        run: |
+          if [[ -f evidence/summary.md ]]; then
+            cat evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Authorization tests did not produce a summary.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload redacted request-response evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: authorization-python-${{ matrix.python }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
+
+  container:
+    name: Test the running non-root container
+    needs: authorization
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Build the hardened application image
+        run: docker build --pull -t authorization-lab:ci .
+      - name: Generate temporary synthetic-user credentials
+        run: |
+          DEMO_PASSWORD=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
+          echo "::add-mask::$DEMO_PASSWORD"
+          echo "DEMO_PASSWORD=$DEMO_PASSWORD" >> "$GITHUB_ENV"
+      - name: Start an isolated container on loopback
+        run: |
+          docker run --detach --name authorization-api \
+            --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --pids-limit=128 --memory=128m --cpus=1 \
+            --publish 127.0.0.1:8080:8080 \
+            --env DEMO_PASSWORD --env SESSION_TTL_SECONDS=3 authorization-lab:ci
+          python - <<'PY'
+          import json, time
+          from urllib.request import urlopen
+          for attempt in range(30):
+              try:
+                  with urlopen('http://127.0.0.1:8080/health', timeout=2) as response:
+                      assert json.load(response) == {'status': 'ok'}
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit('Container readiness timed out')
+          PY
+      - name: Run the complete HTTP suite against the container
+        run: python scripts/run_pipeline.py --base-url http://127.0.0.1:8080 --output evidence
+      - name: Collect container evidence and summary
+        if: always()
+        run: |
+          mkdir -p evidence
+          docker logs authorization-api > evidence/container.log 2>&1 || true
+          docker image inspect authorization-lab:ci --format '{{.Id}}' > evidence/image-id.txt || true
+          if [[ -f evidence/summary.md ]]; then
+            cat evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: authorization-container-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Remove the temporary container
+        if: always()
+        run: docker rm --force authorization-api || true
+
+  security-gate:
+    name: Security gate
+    if: always()
+    needs: [authorization, container]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          AUTHORIZATION_RESULT: ${{ needs.authorization.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+        run: |
+          [[ "$AUTHORIZATION_RESULT" == success && "$CONTAINER_RESULT" == success ]]
+          echo 'PASS: authorization, mutation detection and container HTTP tests.' >> "$GITHUB_STEP_SUMMARY"

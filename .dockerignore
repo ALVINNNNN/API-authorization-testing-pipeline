@@ -1,0 +1,9 @@
+.git
+.env
+evidence*
+__pycache__
+**/__pycache__
+tests
+scripts
+docs
+.github

@@ -1,0 +1,12 @@
+{
+  "owners": ["alice", "bob", "carol"],
+  "actors": {
+    "alice": {"account": [200, 404, 404], "transactions": [200, 404, 404]},
+    "bob": {"account": [404, 200, 404], "transactions": [404, 200, 404]},
+    "carol": {"account": [404, 404, 200], "transactions": [404, 404, 200]},
+    "support": {"account": [200, 200, 404], "transactions": [403, 403, 404]},
+    "admin": {"account": [200, 200, 404], "transactions": [200, 200, 404]},
+    "beta-support": {"account": [404, 404, 200], "transactions": [404, 404, 403]},
+    "beta-admin": {"account": [404, 404, 200], "transactions": [404, 404, 200]}
+  }
+}
